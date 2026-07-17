@@ -797,12 +797,14 @@ class MolecularSurfaceCalculator:
         molecule : int          0 or 1
         xyz      : np.ndarray   shape (N, 3) — atom coordinates
         radii    : np.ndarray   shape (N,)   — atom radii; atoms with radius
-                                               <= 0 are skipped
+                                               <= 0 contribute zero surface
+                                               area but are kept so per-atom
+                                               outputs stay positionally
+                                               aligned with N
         """
         mol_val = 1 if molecule == 1 else 0
-        mask = np.asarray(radii) > 0
-        xyz_f   = np.asarray(xyz)[mask]
-        radii_f = np.asarray(radii)[mask]
+        xyz_f   = np.asarray(xyz)
+        radii_f = np.asarray(radii)
         n = len(radii_f)
         self.run.atoms.extend_from_arrays(xyz_f, radii_f, self.settings.density, mol_val)
         self.run.results.surface[mol_val].nAtoms += n
@@ -1456,23 +1458,27 @@ class MolecularSurfaceCalculator:
             tij = ((atoms.xyz + neigh_xyz) * 0.5) + uij * (asymm[:,None] * 0.5)
 
             far_sq = (eri + erj)**2 - dij*dij
-            if np.any(far_sq <= 0):
-                raise RuntimeError("Imaginary _far_")
-
-            far = np.sqrt(far_sq)
-
             contain_sq = dij*dij - (ri - rj)**2
-            if np.any(contain_sq <= 0):
-                raise RuntimeError("Imaginary contain")
 
-            contain = np.sqrt(contain_sq)
+            # A neighbor whose expanded sphere doesn't overlap this atom's
+            # (far_sq<=0), or whose radius/position makes the near/far torus
+            # geometry undefined relative to this atom (contain_sq<=0 — e.g.
+            # a radius<=0 neighbor sitting inside this atom's own sphere),
+            # can't bias the pole direction. Fall back to the default south
+            # pole for those atoms instead of erroring, mirroring
+            # second_loop's existing geom_ok mask for the identical
+            # pairwise condition.
+            geom_ok = has_neigh & (far_sq > 0.0) & (contain_sq > 0.0)
+
+            far     = np.sqrt(np.where(geom_ok, far_sq, 1.0))
+            contain = np.sqrt(np.where(geom_ok, contain_sq, 1.0))
 
             rij = 0.5 * far * contain / dij
 
             pij = tij + vql * rij[:,None]
             south_vec = (pij - atoms.xyz) / eri[:,None]
 
-            south[has_neigh] = south_vec[has_neigh]
+            south[geom_ok] = south_vec[geom_ok]
 
         # ---------------------------------------------------------
         # Latitude arcs for ALL atoms simultaneously
