@@ -227,6 +227,7 @@ LG*  NLYS    1.75
 *    OXT     1.60
 *    OT*     1.60
 *    S*      1.90
+*    P       2.15
 *    P*      2.15
 *    F*      1.50
 '''
@@ -692,7 +693,11 @@ def wildcard_match(query: str, pattern: str, l: int):
 
         match = (
             (q == p) or
-            (q != '\0' and p == '*') or
+            (p == '*') or  # was `q != '\0' and p == '*'`: that required a leftover query
+                            # char to "absorb" a trailing pattern '*', which works for
+                            # space-padded C strings but not for the stripped names this
+                            # is actually called with (e.g. query "P" ran out exactly where
+                            # pattern "P*"'s '*' began, so it never matched)
             (q == ' ' and p == '\0')
         )
 
