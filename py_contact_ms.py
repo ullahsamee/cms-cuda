@@ -337,14 +337,14 @@ class AtomArray:
         self.xyz = np.zeros((cap, 3), dtype=np.float64)
 
     def _grow(self):
-        new_cap = self._cap * 2
+        new_cap = max(self._cap * 2, 1)
         for f in self._FLOAT_FIELDS + self._INT8_FIELDS + self._INT32_FIELDS:
             old = getattr(self, f)
             new = np.zeros(new_cap, dtype=old.dtype)
             new[:self._n] = old[:self._n]
             setattr(self, f, new)
-        self.atom_name    = self.atom_name    + [''] * self._cap
-        self.residue_name = self.residue_name + [''] * self._cap
+        self.atom_name    = self.atom_name    + [''] * (new_cap - self._cap)
+        self.residue_name = self.residue_name + [''] * (new_cap - self._cap)
         xyz_old = self.xyz
         self.xyz = np.zeros((new_cap, 3), dtype=np.float64)
         self.xyz[:self._n] = xyz_old[:self._n]
@@ -445,6 +445,10 @@ class AtomArray:
         self.xyz          = self.xyz[:self._n]
         self.atom_name    = self.atom_name[:self._n]
         self.residue_name = self.residue_name[:self._n]
+        # Keep _cap in sync with the trimmed size -- otherwise a later append()/
+        # extend_from_arrays() call trusts the stale (larger) pre-trim capacity,
+        # skips growing, and writes past the end of these now-shorter arrays.
+        self._cap = self._n
 
 
 class DotArray:
@@ -470,7 +474,7 @@ class DotArray:
         self.atom_idx = np.zeros(cap, dtype=np.int32)
 
     def _grow(self):
-        new_cap = self._cap * 2
+        new_cap = max(self._cap * 2, 1)
         for f in ('coor_xyz', 'outnml_xyz', 'area', 'buried', 'type_', 'atom_idx'):
             old = getattr(self, f)
             new = np.zeros((new_cap,) + old.shape[1:], dtype=old.dtype)
@@ -512,6 +516,7 @@ class DotArray:
     def finalize(self):
         for f in ('coor_xyz', 'outnml_xyz', 'area', 'buried', 'type_', 'atom_idx'):
             setattr(self, f, getattr(self, f)[:self._n].copy())
+        self._cap = self._n
 
 
 class ProbeArray:
@@ -532,7 +537,7 @@ class ProbeArray:
         self.alt_xyz    = np.zeros((cap, 3), dtype=np.float64)
 
     def _grow(self):
-        new_cap = self._cap * 2
+        new_cap = max(self._cap * 2, 1)
         for f in ('height', 'atom_idx_0', 'atom_idx_1', 'atom_idx_2'):
             old = getattr(self, f)
             new = np.zeros(new_cap, dtype=old.dtype)
@@ -582,6 +587,7 @@ class ProbeArray:
         for f in ('height', 'point_xyz', 'alt_xyz',
                   'atom_idx_0', 'atom_idx_1', 'atom_idx_2'):
             setattr(self, f, getattr(self, f)[:self._n].copy())
+        self._cap = self._n
 
 
 class SimpleNeighborArray:
@@ -779,21 +785,12 @@ class MolecularSurfaceCalculator:
         self.run.neighbor_array = None
         self.run.buried_array = None
         self.run.toroid_queue = []
+        self.run.surfaces_generated = False
+        self.run.surfaces_generated_all_atoms = None
 
     def CalcLoaded(self):
         self.run.results.valid = 0
-        assert len(self.run.atoms) > 0
-
-        # Trim atom arrays to true size before vectorised attention assignment
-        self.run.atoms.finalize()
-
-        self.assign_attention_numbers(self.run.atoms)
-
-        self.generate_molecular_surfaces()
-
-        # Trim dot / probe arrays after surface generation
-        self.run.dots[0].finalize()
-        self.run.dots[1].finalize()
+        self._ensure_surfaces_generated(all_atoms=False)
 
         cms_return = self.calc_contact_molecular_surface(target_side=True)
 
@@ -801,17 +798,7 @@ class MolecularSurfaceCalculator:
 
     def CalcLoadedMaxPossibleCMS(self):
         self.run.results.valid = 0
-        assert len(self.run.atoms) > 0
-
-        # Trim atom arrays to true size before vectorised attention assignment
-        self.run.atoms.finalize()
-
-        self.assign_attention_numbers(self.run.atoms, all_atoms=True)
-
-        self.generate_molecular_surfaces()
-
-        # Trim dot / probe arrays after surface generation
-        self.run.dots[0].finalize()
+        self._ensure_surfaces_generated(all_atoms=True)
 
         cms_return = self.calc_max_possible_contact_molecular_surface(target_side=True)
 
@@ -821,12 +808,14 @@ class MolecularSurfaceCalculator:
         '''
         Compute the Lawrence & Coleman shape complementarity statistic for the loaded molecules.
 
-        Mirrors CalcLoaded() through surface generation, then trims each molecule's dot cloud down
-        to its buried "core" (discarding buried dots within settings.band of an accessible dot) and
-        computes nearest-neighbor distance / normal-vector statistics between the two trimmed
-        surfaces. Never mutates self.run.dots[0]/[1] -- trimmed results are stored as fresh DotArray
-        copies in self.run.trimmed_dots[0]/[1], so a CalcLoaded()/calc_contact_molecular_surface()
-        call on the same instance is unaffected by having run CalcLoadedSC() first.
+        Trims each molecule's dot cloud down to its buried "core" (discarding buried dots
+        within settings.band of an accessible dot) and computes nearest-neighbor distance /
+        normal-vector statistics between the two trimmed surfaces. Never mutates
+        self.run.dots[0]/[1] -- trimmed results are stored as fresh DotArray copies in
+        self.run.trimmed_dots[0]/[1]. Surface generation itself is shared/cached
+        (see _ensure_surfaces_generated) with CalcLoaded()/calc_contact_molecular_surface(),
+        so calling CalcLoaded() and CalcLoadedSC() (either order) on the same instance is
+        safe and only generates the surface once.
 
         Returns
         -------
@@ -835,18 +824,7 @@ class MolecularSurfaceCalculator:
         median_dist : float
         '''
         self.run.results.valid = 0
-        assert len(self.run.atoms) > 0
-
-        # Trim atom arrays to true size before vectorised attention assignment
-        self.run.atoms.finalize()
-
-        self.assign_attention_numbers(self.run.atoms)
-
-        self.generate_molecular_surfaces()
-
-        # Trim dot / probe arrays after surface generation
-        self.run.dots[0].finalize()
-        self.run.dots[1].finalize()
+        self._ensure_surfaces_generated(all_atoms=False)
 
         for i in (0, 1):
             dots = self.run.dots[i]
@@ -883,6 +861,52 @@ class MolecularSurfaceCalculator:
         self.run.results.valid = 1
 
         return self.run.results.sc, self.run.results.area, self.run.results.distance
+
+    def _ensure_surfaces_generated(self, all_atoms=False):
+        """
+        Idempotent, cached surface generation.
+
+        CMS (CalcLoaded) and SC (CalcLoadedSC) are both pure, read-only post-processing
+        readouts of the exact same generated molecular surface -- there's no need to
+        regenerate (or copy) anything to support calling both on one instance. The first
+        call actually runs the atoms/attention/surface-generation pipeline; any later call
+        with a compatible `all_atoms` mode is a no-op that just reuses the already-generated
+        self.run.dots[0]/[1] as-is.
+
+        `all_atoms` controls which attention-number assignment is used (see
+        assign_attention_numbers): CalcLoaded()/CalcLoadedSC() use all_atoms=False (requires
+        both molecules loaded), CalcLoadedMaxPossibleCMS() uses all_atoms=True (single
+        molecule). Reusing a cached surface under a different `all_atoms` mode than it was
+        generated with would silently give wrong results, so that combination raises instead.
+        """
+        if self.run.surfaces_generated:
+            if self.run.surfaces_generated_all_atoms != all_atoms:
+                raise RuntimeError(
+                    "This MolecularSurfaceCalculator instance already generated its "
+                    f"molecular surface with all_atoms={self.run.surfaces_generated_all_atoms}, "
+                    f"but was asked to reuse it with all_atoms={all_atoms}. These use "
+                    "incompatible attention-number assignments (CalcLoadedMaxPossibleCMS's "
+                    "all_atoms=True vs. CalcLoaded()/CalcLoadedSC()'s all_atoms=False), so "
+                    "the cached surface can't be safely reused for both. Call self.reset() "
+                    "and re-add your atoms, or use a fresh MolecularSurfaceCalculator()."
+                )
+            return
+
+        assert len(self.run.atoms) > 0
+
+        # Trim atom arrays to true size before vectorised attention assignment
+        self.run.atoms.finalize()
+
+        self.assign_attention_numbers(self.run.atoms, all_atoms=all_atoms)
+
+        self.generate_molecular_surfaces()
+
+        # Trim dot / probe arrays after surface generation
+        self.run.dots[0].finalize()
+        self.run.dots[1].finalize()
+
+        self.run.surfaces_generated = True
+        self.run.surfaces_generated_all_atoms = all_atoms
 
     def generate_molecular_surfaces(self):
 
@@ -2513,10 +2537,14 @@ if __name__ == '__main__':
     pose = pose_from_file(pdb)
 
     binder_xyz, binder_radii, target_xyz, target_radii= partition_pose(pose)
-    cms, per_target_atom_cms, calc = calculate_contact_ms(binder_xyz, binder_radii, target_xyz, target_radii)
 
+    # CMS and SC are both read-only readouts of the same generated surface, so one
+    # calculator instance can be reused for both instead of building two separate ones.
+    calc = MolecularSurfaceCalculator()
+    calc.add_binder_and_target(binder_xyz, binder_radii, target_xyz, target_radii)
+
+    cms, per_target_atom_cms = calc.CalcLoaded()
     print('CMS: ', cms)
-
 
     d0    = calc.run.dots[0]
     dots0 = d0.coor_xyz
@@ -2524,12 +2552,14 @@ if __name__ == '__main__':
     d1    = calc.run.dots[1]
     dots1 = d1.coor_xyz
 
-    max_cms, max_cms_per_atom, calc2 = calculate_maximum_possible_contact_ms(target_xyz, target_radii)
-    print('Max CMS:', max_cms)
-
-    sc, sc_int_area, median_dist, calc3 = calculate_shape_complementarity(binder_xyz, binder_radii, target_xyz, target_radii)
+    sc, sc_int_area, median_dist = calc.CalcLoadedSC()
     print('SC:', sc)
     print('SC interface area:', sc_int_area)
     print('SC median distance:', median_dist)
+
+    # Max possible CMS uses a single-molecule setup (a different attention-number mode),
+    # so it needs its own calculator rather than reusing calc above.
+    max_cms, max_cms_per_atom, calc2 = calculate_maximum_possible_contact_ms(target_xyz, target_radii)
+    print('Max CMS:', max_cms)
 
 

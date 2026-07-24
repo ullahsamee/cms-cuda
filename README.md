@@ -61,7 +61,14 @@ calc = MolecularSurfaceCalculator()
 calc.add_binder_and_target(binder_xyz, binder_radii, target_xyz, target_radii)
 sc, sc_int_area, median_dist = calc.CalcLoadedSC()
 ```
-Note that this is a separate calculation from CMS's `CalcLoaded()`/`calc_contact_molecular_surface()` (it re-trims and re-derives its own surface statistics), so use a fresh `calc` per call rather than trying to pull both CMS and SC off of one already-`CalcLoaded()`'d instance.
+CMS and SC are both just different read-only readouts of the same underlying molecular surface, so you can freely call `CalcLoaded()` and `CalcLoadedSC()` (in either order) on the same `calc` instance to get both -- surface generation only actually happens once and is cached/reused, it won't be recomputed or corrupted by calling the other:
+```python
+calc = MolecularSurfaceCalculator()
+calc.add_binder_and_target(binder_xyz, binder_radii, target_xyz, target_radii)
+
+cms, per_target_atom_cms = calc.CalcLoaded()
+sc, sc_int_area, median_dist = calc.CalcLoadedSC()
+```
 
 
 Many thanks the Claude and ChatGPT for making this herculean effort possible (in like 20 hours which is insane)
