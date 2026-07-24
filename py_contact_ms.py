@@ -48,6 +48,42 @@ def calculate_contact_ms(binder_xyz, binder_radii, target_xyz, target_radii):
     return cms, per_atom_target_cms, calc
 
 
+def calculate_shape_complementarity(binder_xyz, binder_radii, target_xyz, target_radii):
+    '''
+    Main entrypoint into the code
+
+    Calculate the Lawrence & Coleman shape complementarity (SC) statistic between your binder and target
+
+    Shape complementarity has no natural units and typically falls in [0, 1]; well-packed
+    protein interfaces are usually ~0.5-0.75
+
+    Per-atom shape complementarity doesn't make sense (SC is a whole-interface statistic), so unlike
+    calculate_contact_ms this returns no per-atom array.
+
+    Do not provide your own radii, you need to use the very specific radii raturned from get_radii_from_names()
+
+    Parameters
+    -------
+    binder_xyz   : np.ndarray (N0, 3)
+    binder_radii : np.ndarray (N0,)
+    target_xyz   : np.ndarray (N1, 3)
+    target_radii : np.ndarray (N1,)
+
+
+    Returns
+    -------
+    sc          : float -- The shape complementarity statistic
+    sc_int_area : float -- Summed trimmed interface area of both molecules (A^2)
+    median_dist : float -- Median interface separation distance (A)
+    '''
+
+    calc = MolecularSurfaceCalculator()
+    calc.add_binder_and_target(binder_xyz, binder_radii, target_xyz, target_radii)
+    sc, sc_int_area, median_dist = calc.CalcLoadedSC()
+
+    return sc, sc_int_area, median_dist, calc
+
+
 def get_radii_from_names(res_names, atom_names):
     """
     Look up radii for parallel lists of residue names and atom names.
@@ -781,6 +817,73 @@ class MolecularSurfaceCalculator:
 
         return cms_return
 
+    def CalcLoadedSC(self):
+        '''
+        Compute the Lawrence & Coleman shape complementarity statistic for the loaded molecules.
+
+        Mirrors CalcLoaded() through surface generation, then trims each molecule's dot cloud down
+        to its buried "core" (discarding buried dots within settings.band of an accessible dot) and
+        computes nearest-neighbor distance / normal-vector statistics between the two trimmed
+        surfaces. Never mutates self.run.dots[0]/[1] -- trimmed results are stored as fresh DotArray
+        copies in self.run.trimmed_dots[0]/[1], so a CalcLoaded()/calc_contact_molecular_surface()
+        call on the same instance is unaffected by having run CalcLoadedSC() first.
+
+        Returns
+        -------
+        sc          : float
+        sc_int_area : float
+        median_dist : float
+        '''
+        self.run.results.valid = 0
+        assert len(self.run.atoms) > 0
+
+        # Trim atom arrays to true size before vectorised attention assignment
+        self.run.atoms.finalize()
+
+        self.assign_attention_numbers(self.run.atoms)
+
+        self.generate_molecular_surfaces()
+
+        # Trim dot / probe arrays after surface generation
+        self.run.dots[0].finalize()
+        self.run.dots[1].finalize()
+
+        for i in (0, 1):
+            dots = self.run.dots[i]
+            area, keep_mask = self.trim_peripheral_band_vectorized(dots)
+
+            trimmed = DotArray()
+            trimmed.extend(
+                dots.coor_xyz[keep_mask], dots.outnml_xyz[keep_mask], dots.area[keep_mask],
+                dots.buried[keep_mask], dots.type_[keep_mask], dots.atom_idx[keep_mask],
+            )
+            trimmed.finalize()
+            self.run.trimmed_dots[i] = trimmed
+
+            surf = self.run.results.surface[i]
+            surf.trimmedArea = area
+            surf.nTrimmedDots = int(keep_mask.sum())
+            surf.nAllDots = len(dots)
+
+        self.calc_neighbor_distance_vectorized(0, self.run.trimmed_dots[0], self.run.trimmed_dots[1])
+        self.calc_neighbor_distance_vectorized(1, self.run.trimmed_dots[1], self.run.trimmed_dots[0])
+
+        s0, s1, s2 = self.run.results.surface
+        s2.d_mean = (s0.d_mean + s1.d_mean) / 2
+        s2.d_median = (s0.d_median + s1.d_median) / 2
+        s2.s_mean = (s0.s_mean + s1.s_mean) / 2
+        s2.s_median = (s0.s_median + s1.s_median) / 2
+        s2.nAllDots = s0.nAllDots + s1.nAllDots
+        s2.nTrimmedDots = s0.nTrimmedDots + s1.nTrimmedDots
+        s2.trimmedArea = s0.trimmedArea + s1.trimmedArea
+
+        self.run.results.sc = s2.s_median
+        self.run.results.distance = s2.d_median
+        self.run.results.area = s2.trimmedArea
+        self.run.results.valid = 1
+
+        return self.run.results.sc, self.run.results.area, self.run.results.distance
+
     def generate_molecular_surfaces(self):
 
         assert len(self.run.atoms) > 0
@@ -905,6 +1008,119 @@ class MolecularSurfaceCalculator:
 
         total_area = float(per_atom_area.sum())
         return total_area, per_atom_area
+
+
+    def trim_peripheral_band_vectorized(self, dots):
+        """
+        Vectorised port of TrimPeripheralBand / TrimPeripheralBandCheckDot.
+
+        For a single molecule's dots, keep only the buried dots that have no accessible
+        (non-buried) dot within settings.band of them -- i.e. discard the peripheral band of
+        buried dots near the accessible edge, keeping only the interior "core" surface.
+
+        Read-only: never modifies `dots`.
+
+        Parameters
+        ----------
+        dots : DotArray
+
+        Returns
+        -------
+        trimmed_area : float
+        keep_mask    : np.ndarray shape (len(dots),) dtype=bool
+        """
+        n = len(dots)
+        buried = dots.buried.astype(bool)
+
+        if not buried.any():
+            return 0.0, np.zeros(n, dtype=bool)
+
+        accessible = ~buried
+        if not accessible.any():
+            # Nothing to compare against, so nothing can be "near the edge" -- keep everything buried
+            keep_mask = buried.copy()
+        else:
+            xyz_buried = dots.coor_xyz[buried]
+            xyz_accessible = dots.coor_xyz[accessible]
+
+            min_dist_sq = cdist(xyz_buried, xyz_accessible, metric='sqeuclidean').min(axis=1)
+            keep_buried = min_dist_sq > (self.settings.band ** 2)
+
+            keep_mask = np.zeros(n, dtype=bool)
+            keep_mask[np.where(buried)[0][keep_buried]] = True
+
+        trimmed_area = float(dots.area[keep_mask].sum())
+        return trimmed_area, keep_mask
+
+
+    def _binned_median(self, values, binwidth):
+        """
+        Grouped-data median matching Rosetta's bin-and-linearly-interpolate logic (not np.median).
+
+        Bins each value by floor(value / binwidth), walks bins in ascending order accumulating
+        cumulative percentage-of-count until it crosses 50%, then linearly interpolates within
+        that bin.
+        """
+        n = len(values)
+        if n == 0:
+            return 0.0
+
+        ibin = np.floor(values / binwidth).astype(np.int64)
+        bins, counts = np.unique(ibin, return_counts=True)
+
+        pct_per_count = 100.0 / n
+        cumperc = np.cumsum(counts) * pct_per_count
+        cumperc_before = cumperc - counts * pct_per_count
+
+        j = np.searchsorted(cumperc, 50.0, side='left')
+        j = min(j, len(bins) - 1)
+
+        bin_perc = counts[j] * pct_per_count
+        median = bins[j] * binwidth + (50.0 - cumperc_before[j]) * binwidth / bin_perc
+        return float(median)
+
+
+    def calc_neighbor_distance_vectorized(self, molecule, my_dots, their_dots):
+        """
+        Vectorised port of CalcNeighborDistance.
+
+        For each dot in my_dots, find its nearest dot in their_dots (both are expected to be
+        already-trimmed, all-buried DotArrays) and accumulate distance / normal-vector-dot-product
+        statistics into self.run.results.surface[molecule].
+
+        Parameters
+        ----------
+        molecule   : int  0, 1, or 2 -- which surface slot to write results into
+        my_dots    : DotArray
+        their_dots : DotArray
+        """
+        if len(my_dots) == 0 or len(their_dots) == 0:
+            return
+
+        their_buried = their_dots.buried.astype(bool)
+        if not their_buried.any():
+            return
+
+        their_xyz = their_dots.coor_xyz[their_buried]
+        their_outnml = their_dots.outnml_xyz[their_buried]
+
+        my_xyz = my_dots.coor_xyz
+        my_outnml = my_dots.outnml_xyz
+
+        dist_sq = cdist(their_xyz, my_xyz, metric='sqeuclidean')
+        nearest_idx = np.argmin(dist_sq, axis=0)
+        distmin = np.sqrt(dist_sq[nearest_idx, np.arange(len(my_xyz))])
+
+        neighbor_outnml = their_outnml[nearest_idx]
+        r = np.einsum('mi,mi->m', my_outnml, neighbor_outnml)
+        r = r * np.exp(-np.square(distmin) * self.settings.weight)
+        r = np.clip(r, -0.999, 0.999)
+
+        surf = self.run.results.surface[molecule]
+        surf.d_mean = float(distmin.mean())
+        surf.d_median = self._binned_median(distmin, self.settings.binwidth_dist)
+        surf.s_mean = float(-r.mean())
+        surf.s_median = float(-self._binned_median(r, self.settings.binwidth_norm))
 
 
     def assign_attention_numbers(self, atoms, all_atoms=False):
@@ -2310,5 +2526,10 @@ if __name__ == '__main__':
 
     max_cms, max_cms_per_atom, calc2 = calculate_maximum_possible_contact_ms(target_xyz, target_radii)
     print('Max CMS:', max_cms)
+
+    sc, sc_int_area, median_dist, calc3 = calculate_shape_complementarity(binder_xyz, binder_radii, target_xyz, target_radii)
+    print('SC:', sc)
+    print('SC interface area:', sc_int_area)
+    print('SC median distance:', median_dist)
 
 
