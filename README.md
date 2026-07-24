@@ -41,5 +41,27 @@ from py_contact_ms import calculate_maximum_possible_contact_ms
 max_target_cms, max_target_cms_per_atom = calculate_maximum_possible_contact_ms(target_xyz, target_radii)
 ```
 
+If you actually want the original Lawrence & Coleman shape complementarity statistic itself (rather than contact ms's distance-weighted surface area), that's in here too now. Unlike contact_ms, SC is a single whole-interface statistic, so there's no such thing as a sensible per-atom SC value:
+```python
+from py_contact_ms import calculate_shape_complementarity, get_radii_from_names
+
+# Same xyz/radii setup as above
+sc, sc_int_area, median_dist, calc = calculate_shape_complementarity(binder_xyz, binder_radii, target_xyz, target_radii)
+
+# sc          -- the shape complementarity statistic (usually 0-1; well-packed interfaces are ~0.5-0.75)
+# sc_int_area -- summed trimmed interface area of both molecules (A^2)
+# median_dist -- median interface separation distance (A)
+```
+
+SC isn't a separate calculator class -- it's the same `MolecularSurfaceCalculator` used for contact ms. So if you'd rather build the calc yourself (same pattern as `calculate_contact_ms` above) you can just call `CalcLoadedSC()` directly instead of going through the convenience function:
+```python
+from py_contact_ms import MolecularSurfaceCalculator
+
+calc = MolecularSurfaceCalculator()
+calc.add_binder_and_target(binder_xyz, binder_radii, target_xyz, target_radii)
+sc, sc_int_area, median_dist = calc.CalcLoadedSC()
+```
+Note that this is a separate calculation from CMS's `CalcLoaded()`/`calc_contact_molecular_surface()` (it re-trims and re-derives its own surface statistics), so use a fresh `calc` per call rather than trying to pull both CMS and SC off of one already-`CalcLoaded()`'d instance.
+
 
 Many thanks the Claude and ChatGPT for making this herculean effort possible (in like 20 hours which is insane)
