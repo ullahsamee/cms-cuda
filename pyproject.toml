@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cms-cuda"
+version = "0.2.0"
+description = "GPU-accelerated (CUDA) contact molecular surface and shape complementarity for protein design, built on bcov77/py_contact_ms"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.8"
+authors = []
+keywords = ["protein", "molecular-surface", "contact", "shape-complementarity", "bioinformatics", "protein-design", "cuda", "gpu"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "biopython",
+]
+
+[project.optional-dependencies]
+# GPU acceleration (NVIDIA, CUDA 13 driver). Use cupy-cuda12x instead on CUDA 12.
+gpu = ["cupy-cuda13x"]
+
+[project.urls]
+Homepage = "https://github.com/ullahsamee/cms-cuda"
+Repository = "https://github.com/ullahsamee/cms-cuda"
+Issues = "https://github.com/ullahsamee/cms-cuda/issues"
+
+[tool.setuptools.packages.find]
+include = ["cms_cuda*"]
