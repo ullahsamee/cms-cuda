@@ -1,6 +1,6 @@
 # cms-cuda
 
-GPU-accelerated (CUDA) **contact molecular surface (CMS)** and **Lawrence & Colman shape complementarity (SC)** for protein design. Caution still in development and there maybe issues in some cases.
+GPU-accelerated (CUDA) **contact molecular surface (CMS)** and **Lawrence & Colman shape complementarity (SC)** for protein design. Caution still in development and there maybe issues in some cases. However I have tested successfully the attached examples such as binder, scFv, and small molecule.
 
 cms-cuda is built on [bcov77/py_contact_ms](https://github.com/bcov77/py_contact_ms) by Brian Coventry, the Python port of Longxing Cao's C++ contact molecular surface. The original NumPy code is included unchanged and used on the CPU. The GPU version gives the same results (identical dot counts, values within ~1e-13) and is 36–165× faster per complex.
 
